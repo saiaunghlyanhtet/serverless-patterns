@@ -1,6 +1,6 @@
 package com.sahh.multiregiondatareplication;
 
-import com.amazonaws.services.dynamodbv2.document.KeyAttribute;
+import com.amazonaws.services.dynamodbv2.document.*;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.LambdaLogger;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
@@ -8,9 +8,6 @@ import com.amazonaws.services.lambda.runtime.events.DynamodbEvent;
 import com.amazonaws.services.lambda.runtime.events.DynamodbEvent.DynamodbStreamRecord;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
-import com.amazonaws.services.dynamodbv2.document.DynamoDB;
-import com.amazonaws.services.dynamodbv2.document.Item;
-import com.amazonaws.services.dynamodbv2.document.Table;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +16,8 @@ public class DataReplicator implements RequestHandler<DynamodbEvent, List<String
 
     private static final String DESTINATION_TABLE_NAME = "UserDB2";
     private static final String DESTINATION_REGION = "us-west-2";
+
+    private final List<Table> replicas = new ArrayList<>();
 
     @Override
     public List<String> handleRequest(DynamodbEvent event, Context context) {
@@ -30,6 +29,7 @@ public class DataReplicator implements RequestHandler<DynamodbEvent, List<String
         DynamoDB destinationDynamoDB = new DynamoDB(destinationClient);
         Table destinationTable = destinationDynamoDB.getTable(DESTINATION_TABLE_NAME);
         logger.log("Destination table: " + destinationTable.getTableName());
+        replicas.add(destinationTable);
 
         for (DynamodbStreamRecord record : event.getRecords()) {
             String eventName = record.getEventName();
@@ -40,9 +40,19 @@ public class DataReplicator implements RequestHandler<DynamodbEvent, List<String
                 String name = record.getDynamodb().getNewImage().get("name").getS();
                 String email = record.getDynamodb().getNewImage().get("email").getS();
 
-                // Write the data to another DynamoDB table in a different region
-                destinationTable.putItem(new Item().withString("name", name).withString("email", email));
-                operationsFound.add("Data written to destination table: " + name + ", " + email);
+                // Write the data to all replicas and wait for acknowledgements
+                int majority = replicas.size() / 2 + 1;
+                int acknowledgements = 0;
+                for (Table replica : replicas) {
+                    PutItemOutcome outcome = replica.putItem(new Item().withString("name", name).withString("email", email));
+                    if (outcome != null) {
+                        acknowledgements++;
+                    }
+                    if (acknowledgements >= majority) {
+                        operationsFound.add("Data written to majority of replicas: " + name + ", " + email);
+                        break;
+                    }
+                }
 
             } else if ("REMOVE".equals(eventName)) {
                 // Extract the email from the stream record
